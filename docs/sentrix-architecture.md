@@ -314,11 +314,10 @@ User 1──* Group 1──* Device 1──* Telemetry
 
 ### Recommended schema changes
 
-Add as a new migration in `sentrix-web/supabase/migrations`:
+Added as `sentrix-web/supabase/migrations/20261018000000_telemetry_unique_device_timestamp.sql`:
 
 ```sql
--- Required for upsert in Python to not create duplicates
-alter table prediction_bounds add constraint prediction_bounds_device_ts_key unique (device_id, "timestamp");
+-- prediction_bounds already has unique (device_id, "timestamp") in the initial migration.
 
 -- Lets Go use ON CONFLICT DO NOTHING so a redelivered QoS 1 message isn't stored twice
 alter table telemetry add constraint telemetry_device_ts_key unique (device_id, "timestamp");
