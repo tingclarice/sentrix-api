@@ -35,7 +35,7 @@ ESP32 -> MQTT broker -> **Go (this repo)** -> Supabase Postgres <- Python (train
 
 ## Known gaps / fixes to make
 
-1. `ON CONFLICT DO NOTHING` on the telemetry insert is a no-op: schema has no unique key on `telemetry(device_id, timestamp)`. Add the migration from architecture section 7 (in `sentrix-web/supabase/migrations`), or drop the clause.
+1. `ON CONFLICT DO NOTHING` on the telemetry insert is a no-op: schema has no unique key on `telemetry(device_id, timestamp)`. Fixed by the migration `20261018000000_telemetry_unique_device_timestamp.sql` in `sentrix-web` (branch `unique-telemetry-bounds`). Once it is merged and applied to Supabase, this gap is closed.
 2. `handleHandshake` is a stub. Needs to verify MAC + PIN (Flow 1 step 8) and mark the device online. Schema has no "online" field yet, so decide how (status, or a `last_seen` column).
 3. `CALIBRATION_MINUTES` is not read. It belongs in the device-claim endpoint (`calibration_ends_at = now() + CALIBRATION_MINUTES`).
 4. No bounds check / alerts yet (arch 8.3). Require **3 consecutive breaches** or a cooldown before inserting an alert (gotcha #7). Skip if no bound exists for that hour.
