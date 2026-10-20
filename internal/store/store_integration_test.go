@@ -272,4 +272,59 @@ func TestPGAgainstRealDatabase(t *testing.T) {
 	if _, err := s.ResolveAlert(ctx, top.ID, stranger); !errors.Is(err, ErrNotFound) {
 		t.Errorf("stranger resolve: %v, want ErrNotFound", err)
 	}
+
+	// Push subscriptions.
+	const ep1, ep2 = "https://fcm.googleapis.com/fcm/send/store-test-1", "https://fcm.googleapis.com/fcm/send/store-test-2"
+	t.Cleanup(func() { db.Exec(ctx, `DELETE FROM push_subscriptions WHERE endpoint LIKE '%/store-test-%'`) })
+	sub1 := PushSubscription{Endpoint: ep1, P256dh: "key-1", Auth: "auth-1"}
+	if err := s.SavePushSubscription(ctx, userID, sub1); err != nil {
+		t.Fatalf("SavePushSubscription: %v", err)
+	}
+	sub1.P256dh = "key-1b" // re-subscribing the same endpoint updates it, no duplicate
+	if err := s.SavePushSubscription(ctx, userID, sub1); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SavePushSubscription(ctx, userID, PushSubscription{Endpoint: ep2, P256dh: "key-2", Auth: "auth-2"}); err != nil {
+		t.Fatal(err)
+	}
+	subs, err := s.PushSubscriptionsForDevice(ctx, d.ID) // d is in g, which userID owns
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := map[string]string{}
+	for _, ps := range subs {
+		found[ps.Endpoint] = ps.P256dh
+	}
+	if found[ep1] != "key-1b" || found[ep2] != "key-2" {
+		t.Errorf("subscriptions for the device = %v, want both, with ep1 updated", found)
+	}
+
+	// Deleting needs the right owner; the push service's "gone" cleanup does not.
+	s.DeletePushSubscription(ctx, stranger, ep1)
+	if subs, _ := s.PushSubscriptionsForDevice(ctx, d.ID); len(subs) < 2 {
+		t.Error("a stranger removed a subscription")
+	}
+	if err := s.DeletePushSubscription(ctx, userID, ep1); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeletePushSubscriptionByEndpoint(ctx, ep2); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeletePushSubscription(ctx, userID, ep1); err != nil { // already gone: not an error
+		t.Errorf("deleting a missing subscription: %v", err)
+	}
+	for _, ps := range mustSubs(t, s, ctx, d.ID) {
+		if ps.Endpoint == ep1 || ps.Endpoint == ep2 {
+			t.Errorf("%s still stored", ps.Endpoint)
+		}
+	}
+}
+
+func mustSubs(t *testing.T, s *PG, ctx context.Context, deviceID string) []PushSubscription {
+	t.Helper()
+	subs, err := s.PushSubscriptionsForDevice(ctx, deviceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return subs
 }

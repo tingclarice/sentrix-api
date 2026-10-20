@@ -9,6 +9,7 @@ import (
 // device is the slice of a devices row that ingest needs for every reading.
 type device struct {
 	ID                string
+	Name              string // empty if the device has no name
 	Status            string
 	CalibrationEndsAt *time.Time
 }

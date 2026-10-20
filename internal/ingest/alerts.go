@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/tingclarice/sentrix-api/internal/push"
 )
 
 // Alert rules (backend spec section 6, architecture gotcha #7).
@@ -175,7 +177,8 @@ func (s *Service) loadBound(ctx context.Context, deviceID string, hour time.Time
 
 // checkAlert compares one reading from an ACTIVE device with its hourly bound and
 // inserts an alert when the rules in this file say so.
-func (s *Service) checkAlert(ctx context.Context, deviceID string, r Reading) error {
+func (s *Service) checkAlert(ctx context.Context, dev device, r Reading) error {
+	deviceID := dev.ID
 	ts := time.Unix(r.TS, 0)
 	if time.Since(ts) > maxReadingAge {
 		return nil // a replayed or redelivered reading, not a live anomaly
@@ -197,13 +200,21 @@ func (s *Service) checkAlert(ctx context.Context, deviceID string, r Reading) er
 	}
 
 	sev := severity(r.RMSCurrent, b)
-	_, err = s.db.Exec(ctx, `
+	var alertID string
+	err = s.db.QueryRow(ctx, `
 		INSERT INTO alerts (device_id, "timestamp", actual_value, expected_max, expected_min, severity)
-		VALUES ($1, $2, $3, $4, $5, $6)`,
-		deviceID, ts, r.RMSCurrent, b.Upper, b.Lower, sev)
+		VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+		deviceID, ts, r.RMSCurrent, b.Upper, b.Lower, sev).Scan(&alertID)
 	if err != nil {
 		return fmt.Errorf("insert alert: %w", err)
 	}
 	log.Printf("alert: device %s %s, %.2fA outside %.2f-%.2fA", deviceID, sev, r.RMSCurrent, b.Lower, b.Upper)
+
+	if s.notifier != nil {
+		s.notifier.Notify(push.Alert{
+			ID: alertID, DeviceID: deviceID, DeviceName: dev.Name, DeviceMAC: r.MAC,
+			Severity: sev, Value: r.RMSCurrent, Min: b.Lower, Max: b.Upper,
+		})
+	}
 	return nil
 }

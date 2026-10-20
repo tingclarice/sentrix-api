@@ -73,6 +73,8 @@ func (s *Server) Handler() http.Handler {
 	authed("GET /api/alerts", s.listAlerts)
 	authed("PATCH /api/alerts/{id}/feedback", s.alertFeedback)
 	authed("PATCH /api/alerts/{id}/resolve", s.resolveAlert)
+	authed("POST /api/push/subscribe", s.pushSubscribe)
+	authed("DELETE /api/push/subscribe", s.pushUnsubscribe)
 
 	return s.recoverer(s.logger(s.cors(mux)))
 }

@@ -27,6 +27,7 @@ type fakeStore struct {
 	lastTelemetry  telemetryCall
 	lastBoundsFrom time.Time
 
+	pushSubs        map[string]pushRow // endpoint -> row
 	alerts          []store.Alert
 	alertOwners     map[string]string // alert id -> owner
 	lastAlertFilter store.AlertFilter
@@ -97,6 +98,43 @@ func (f *fakeStore) alertFor(alertID, userID string) (store.Alert, bool) {
 		}
 	}
 	return store.Alert{}, false
+}
+
+func (f *fakeStore) SavePushSubscription(_ context.Context, userID string, sub store.PushSubscription) error {
+	if f.pushSubs == nil {
+		f.pushSubs = map[string]pushRow{}
+	}
+	if _, exists := f.pushSubs[sub.Endpoint]; !exists {
+		n := 0
+		for _, row := range f.pushSubs {
+			if row.userID == userID {
+				n++
+			}
+		}
+		if n >= store.MaxPushSubscriptionsPerUser {
+			return store.ErrTooManySubscriptions
+		}
+	}
+	f.pushSubs[sub.Endpoint] = pushRow{userID, sub}
+	return nil
+}
+
+func (f *fakeStore) DeletePushSubscription(_ context.Context, userID, endpoint string) error {
+	if row, ok := f.pushSubs[endpoint]; ok && row.userID == userID {
+		delete(f.pushSubs, endpoint)
+	}
+	return nil
+}
+
+func (f *fakeStore) PushSubscriptionsForDevice(context.Context, string) ([]store.PushSubscription, error) {
+	return nil, nil
+}
+
+func (f *fakeStore) DeletePushSubscriptionByEndpoint(context.Context, string) error { return nil }
+
+type pushRow struct {
+	userID string
+	sub    store.PushSubscription
 }
 
 type telemetryCall struct {

@@ -26,7 +26,7 @@ Real onboarding does not work without these (see `handoff.md` known gaps).
 ## 3. Deploy the Go service
 
 - [ ] Host that runs 24/7 (readings published while Go is down are only delivered after it reconnects, via the persistent session).
-- [ ] Set environment variables on the host, not in a committed file: `DATABASE_URL`, `MQTT_*`, `PYTHON_SERVICE_URL`, `INTERNAL_API_KEY`, `CALIBRATION_MINUTES`, plus `SUPABASE_JWT_SECRET` and `VAPID_*` once added.
+- [ ] Set environment variables on the host, not in a committed file: `DATABASE_URL`, `MQTT_*`, `PYTHON_SERVICE_URL`, `INTERNAL_API_KEY`, `CALIBRATION_MINUTES`, plus `SUPABASE_URL`, `ALLOWED_ORIGINS`, `PORT`, and `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` (`SUPABASE_JWT_SECRET` only for a legacy HS256 project).
 - [ ] `DATABASE_URL` uses the Supabase pooler string (the app already uses the simple protocol for it).
 - [ ] The service exits cleanly on SIGTERM, so it is safe under a process manager or container.
 
@@ -48,7 +48,7 @@ Real onboarding does not work without these (see `handoff.md` known gaps).
 
 - [ ] Set `NEXT_PUBLIC_GO_API_URL` to the deployed Go API once the REST endpoints exist.
 - [ ] Web Bluetooth only works over HTTPS in Chrome/Edge or Chrome on Android.
-- [ ] Web Push: VAPID keys generated, public key in the frontend env, private key only in Go's env.
+- [ ] Web Push: generate VAPID keys once with `go run ./cmd/vapidgen`, public key in the frontend env (`NEXT_PUBLIC_VAPID_PUBLIC_KEY`), private key only in Go's env, `VAPID_SUBJECT` set to a real contact. Reuse the same keys everywhere: changing them invalidates every browser subscription.
 
 ## 7. Firmware (IoT team)
 

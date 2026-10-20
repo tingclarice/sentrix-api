@@ -33,8 +33,8 @@ The server verifies the token locally (signature, expiry, audience `authenticate
 | GET | `/api/alerts` | yes | `200` array of alerts, newest first |
 | PATCH | `/api/alerts/{id}/feedback` | yes | `200` updated alert |
 | PATCH | `/api/alerts/{id}/resolve` | yes | `200` updated alert |
-
-Planned (see `sentrix-architecture.md` section 5.5): Web Push subscriptions (`POST /api/push/subscribe`).
+| POST | `/api/push/subscribe` | yes | `201` save a browser's Web Push subscription |
+| DELETE | `/api/push/subscribe` | yes | `204` remove it |
 
 Path IDs must be UUIDs. A malformed ID, a missing resource and someone else's resource all return the same `404`.
 
@@ -138,6 +138,46 @@ To page, pass the `timestamp` of the last alert you received as `before`. A bad 
 **PATCH /api/alerts/{id}/resolve**: no body. Marks the alert resolved (sending it again is harmless) and returns the updated alert. Resolved alerts disappear from the default list; use `status=resolved` or `all` to see them.
 
 An alert that is not yours, does not exist or has a malformed ID is `404`.
+
+### Web Push
+
+When the alert engine creates an alert, the server sends a push notification to every browser the device owner has subscribed, so they hear about it even with the tab closed. The frontend has to register the browser:
+
+1. Add a service worker (for example `public/sw.js`) that shows the notification:
+   ```js
+   self.addEventListener("push", (event) => {
+     const data = event.data.json(); // { title, body, alert_id, device_id, severity, url }
+     event.waitUntil(self.registration.showNotification(data.title, {
+       body: data.body, data, tag: data.alert_id,
+     }));
+   });
+   self.addEventListener("notificationclick", (event) => {
+     event.notification.close();
+     event.waitUntil(clients.openWindow(event.notification.data.url));
+   });
+   ```
+2. After the user allows notifications, subscribe with the server's **public** VAPID key (`NEXT_PUBLIC_VAPID_PUBLIC_KEY`, printed by `go run ./cmd/vapidgen -env .env`) and send the result to the API:
+   ```ts
+   const reg = await navigator.serviceWorker.register("/sw.js");
+   if ((await Notification.requestPermission()) !== "granted") return;
+   const sub = await reg.pushManager.subscribe({
+     userVisibleOnly: true,
+     applicationServerKey: process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY, // base64url string
+   });
+   await api("/api/push/subscribe", { method: "POST", body: JSON.stringify(sub) }); // sub.toJSON()
+   ```
+Push needs HTTPS (or `localhost`). The same VAPID key pair must be used for the life of the subscriptions: if the server's keys change, every browser must subscribe again.
+
+**POST /api/push/subscribe**: body is the browser's `PushSubscription` JSON, `{"endpoint": "...", "keys": {"p256dh": "...", "auth": "..."}}`. Sending it again is harmless (it updates). If the same browser logs in as another user, the subscription moves to the new user.
+
+| Status | Meaning |
+|---|---|
+| 400 | not valid JSON, `endpoint` is not an `https` URL of a known browser push service (Google FCM, Mozilla, Apple, Windows), or `keys` are not valid push keys |
+| 409 | the user already has 20 subscriptions |
+
+**DELETE /api/push/subscribe**: body `{"endpoint": "..."}`. Always `204`, whether or not it existed; you can only remove your own. Call it when the user turns notifications off.
+
+The server removes subscriptions that a push service reports as expired. If `VAPID_*` is not configured the server still stores subscriptions but sends nothing.
 
 ## Adding a route
 
