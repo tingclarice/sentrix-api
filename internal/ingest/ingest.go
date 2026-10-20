@@ -34,13 +34,20 @@ type Payload struct {
 }
 
 type Service struct {
-	cfg     config.Config
-	db      *pgxpool.Pool
-	devices *deviceCache
+	cfg      config.Config
+	db       *pgxpool.Pool
+	devices  *deviceCache
+	bounds   *boundCache
+	breaches *breachTracker
 }
 
 func New(cfg config.Config, db *pgxpool.Pool) *Service {
-	return &Service{cfg: cfg, db: db, devices: newDeviceCache(15 * time.Second)}
+	return &Service{
+		cfg: cfg, db: db,
+		devices:  newDeviceCache(15 * time.Second),
+		bounds:   newBoundCache(),
+		breaches: newBreachTracker(),
+	}
 }
 
 // InvalidateDevice drops the cached copy of a device, for when something outside
@@ -139,7 +146,9 @@ func (s *Service) processReading(ctx context.Context, r Reading) error {
 			s.maybeStartCalibration(ctx, r.MAC, dev.ID)
 		}
 	case "ACTIVE":
-		// TO DO: check bounds, alert after 3 consecutive breaches (architecture 8.3).
+		if err := s.checkAlert(ctx, dev.ID, r); err != nil {
+			log.Printf("alert check %s: %v", r.MAC, err)
+		}
 	}
 	return nil
 }
