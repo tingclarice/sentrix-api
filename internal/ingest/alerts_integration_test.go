@@ -60,7 +60,7 @@ func TestAlertFlowAgainstRealDatabase(t *testing.T) {
 	feed := func(minsAgo int, amps float64) {
 		t.Helper()
 		r := Reading{MAC: mac, RMSCurrent: amps, TS: now.Add(-time.Duration(minsAgo) * time.Minute).Unix()}
-		if err := svc.processReading(ctx, r); err != nil {
+		if err := svc.processReading(ctx, r, ""); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -122,7 +122,7 @@ func TestAlertFlowAgainstRealDatabase(t *testing.T) {
 	svc2 := New(config.Config{}, db)
 	for i := 0; i < 5; i++ {
 		r := Reading{MAC: mac, RMSCurrent: 15, TS: now.Add(-time.Duration(120+i) * time.Minute).Unix()}
-		if err := svc2.processReading(ctx, r); err != nil {
+		if err := svc2.processReading(ctx, r, ""); err != nil {
 			t.Fatal(err)
 		}
 	}

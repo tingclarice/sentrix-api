@@ -10,6 +10,7 @@ import (
 type device struct {
 	ID                string
 	Name              string // empty if the device has no name
+	MeshID            string // mesh_id of the device's group; empty if it has none
 	Status            string
 	CalibrationEndsAt *time.Time
 }

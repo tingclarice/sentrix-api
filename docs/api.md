@@ -48,7 +48,10 @@ Path IDs must be UUIDs. A malformed ID, a missing resource and someone else's re
 // device. The PIN is never returned.
 { "id": "uuid", "mac_address": "AABBCCDDEEFF", "name": "Pump 1" /* or null */,
   "group_id": "uuid" /* or null */, "status": "CALIBRATING",
-  "calibration_started_at": "...", "calibration_ends_at": "...", "created_at": "..." }
+  "calibration_started_at": "...", "calibration_ends_at": "...", "created_at": "...",
+  // reported by the device itself over MQTT; null until its first handshake or data
+  "last_seen": "2026-10-20T08:00:00Z", "firmware_version": "1.2.4-stable",
+  "local_ip": "192.168.1.45", "wifi_rssi": -62, "node_role": "root" /* or "child" */ }
 ```
 
 `status` is one of `UNCLAIMED`, `CALIBRATING`, `ACTIVE`, `OFFLINE`.
@@ -61,7 +64,7 @@ Body: `{"name": "Building A", "description": "optional"}`. `name` is required (1
 
 Body: `{"mac": "AABBCCDDEEFF", "pin": "123456", "name": "optional"}`.
 
-- `mac`: 12 hex characters, no colons (lowercase is accepted and uppercased).
+- `mac`: the device's MAC. Both `AABBCCDDEEFF` and `AA:BB:CC:DD:EE:FF` are accepted (any case; `-` also works).
 - `pin`: the 6 digits printed with the MAC on the device.
 
 On success the device moves from `UNCLAIMED` to `CALIBRATING`, is attached to the group, and `calibration_ends_at` is set `CALIBRATION_MINUTES` ahead (default 10080 = 7 days; set it to 5 to test quickly).

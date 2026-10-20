@@ -13,23 +13,64 @@ import (
 	"math/rand"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
-type reading struct {
-	MAC        string  `json:"mac"`
-	RMSCurrent float64 `json:"rms_current"`
-	TS         int64   `json:"ts"`
+// colonMAC formats AABBCCDDEEFF as AA:BB:CC:DD:EE:FF, the way the firmware sends it.
+// Input that is not 12 characters is returned unchanged.
+func colonMAC(mac string) string {
+	mac = strings.ToUpper(strings.NewReplacer(":", "", "-", "").Replace(mac))
+	if len(mac) != 12 {
+		return mac
+	}
+	parts := make([]string, 6)
+	for i := range parts {
+		parts[i] = mac[2*i : 2*i+2]
+	}
+	return strings.Join(parts, ":")
+}
+
+type batchReading struct {
+	MAC                string  `json:"mac"`
+	NodeType           string  `json:"node_type"`
+	RMSCurrent         float64 `json:"rms_current"`
+	CurrentTemperature float64 `json:"current_temperature"`
+	TargetTemperature  float64 `json:"target_temperature"`
+}
+
+// batch is sentrix/dt/{mesh_id}/batch, as the IoT team defined it.
+type batch struct {
+	MeshID       string         `json:"mesh_id"`
+	Timestamp    int64          `json:"timestamp"`
+	RootMAC      string         `json:"root_mac"`
+	Readings     []batchReading `json:"readings"`
+	OfflineNodes []string       `json:"offline_nodes"`
+}
+
+// handshake is sentrix/auth/{mac}/connect.
+type handshake struct {
+	MACAddress      string `json:"mac_address"`
+	DevicePIN       string `json:"device_pin"`
+	MeshID          string `json:"mesh_id"`
+	Role            string `json:"role"`
+	FirmwareVersion string `json:"firmware_version"`
+	LocalIP         string `json:"local_ip"`
+	WifiRSSI        int    `json:"wifi_rssi"`
+	Timestamp       int64  `json:"timestamp"`
 }
 
 func main() {
 	broker := flag.String("broker", envOr("MQTT_BROKER_URL", "tcp://localhost:1883"), "MQTT broker URL")
 	user := flag.String("user", os.Getenv("MQTT_USERNAME"), "MQTT username")
 	pass := flag.String("pass", os.Getenv("MQTT_PASSWORD"), "MQTT password")
-	mac := flag.String("mac", "AABBCCDDEEFF", "device MAC (uppercase, 12 hex, no colons)")
+	mac := flag.String("mac", "AABBCCDDEEFF", "device MAC, with or without colons")
+	pin := flag.String("pin", "123456", "device PIN, sent in the handshake")
+	mesh := flag.String("mesh", "MESH_89AB", "mesh_id; must match the device's group once it has one")
+	noHandshake := flag.Bool("no-handshake", false, "skip the handshake message")
 	backfill := flag.Int("backfill-days", 0, "publish this many past days of readings first (1 per minute)")
 	delay := flag.Duration("backfill-delay", 150*time.Millisecond, "pause between backfill messages; the Go service ingests ~8-9/s, and the broker drops messages once its per-client queue (default 1000) overflows")
 	live := flag.Bool("live", false, "after any backfill, keep publishing a reading every -interval")
@@ -55,12 +96,32 @@ func main() {
 	}
 	defer client.Disconnect(250)
 
-	topic := "sentrix/telemetry/" + *mac
-	publish := func(ts time.Time, amps float64) error {
-		b, _ := json.Marshal(reading{MAC: *mac, RMSCurrent: round2(amps), TS: ts.Unix()})
+	nodeMAC := colonMAC(*mac)
+	send := func(topic string, v any) error {
+		b, _ := json.Marshal(v)
 		t := client.Publish(topic, 1, false, b)
 		t.Wait()
 		return t.Error()
+	}
+	if !*noHandshake {
+		err := send("sentrix/auth/"+nodeMAC+"/connect", handshake{
+			MACAddress: nodeMAC, DevicePIN: *pin, MeshID: *mesh, Role: "root",
+			FirmwareVersion: "sim-1.0.0", LocalIP: "192.168.1.45", WifiRSSI: -60, Timestamp: time.Now().Unix(),
+		})
+		if err != nil {
+			log.Fatalf("handshake: %v", err)
+		}
+		log.Printf("handshake sent for %s", nodeMAC)
+	}
+	publish := func(ts time.Time, amps float64) error {
+		return send("sentrix/dt/"+*mesh+"/batch", batch{
+			MeshID: *mesh, Timestamp: ts.Unix(), RootMAC: nodeMAC,
+			Readings: []batchReading{{
+				MAC: nodeMAC, NodeType: "root", RMSCurrent: round2(amps),
+				CurrentTemperature: 24.5, TargetTemperature: 24.0,
+			}},
+			OfflineNodes: []string{},
+		})
 	}
 
 	stop := make(chan os.Signal, 1)

@@ -37,6 +37,13 @@ type Device struct {
 	CalibrationStartedAt *time.Time `json:"calibration_started_at"`
 	CalibrationEndsAt    *time.Time `json:"calibration_ends_at"`
 	CreatedAt            time.Time  `json:"created_at"`
+
+	// Reported by the device itself over MQTT; nil until its first handshake or batch.
+	LastSeen        *time.Time `json:"last_seen"`
+	FirmwareVersion *string    `json:"firmware_version"`
+	LocalIP         *string    `json:"local_ip"`
+	WifiRSSI        *int       `json:"wifi_rssi"`
+	NodeRole        *string    `json:"node_role"` // "root" or "child"
 }
 
 // TelemetryPoint is one chart point. Raw readings have MaxRMSCurrent equal to
@@ -223,12 +230,14 @@ func (s *PG) GroupOwnedBy(ctx context.Context, groupID, userID string) error {
 }
 
 const deviceCols = `id, mac_address, name, group_id, status::text,
-	calibration_started_at, calibration_ends_at, created_at`
+	calibration_started_at, calibration_ends_at, created_at,
+	last_seen, firmware_version, local_ip, wifi_rssi, node_role`
 
 func scanDevice(row pgx.Row) (Device, error) {
 	var d Device
 	err := row.Scan(&d.ID, &d.MACAddress, &d.Name, &d.GroupID, &d.Status,
-		&d.CalibrationStartedAt, &d.CalibrationEndsAt, &d.CreatedAt)
+		&d.CalibrationStartedAt, &d.CalibrationEndsAt, &d.CreatedAt,
+		&d.LastSeen, &d.FirmwareVersion, &d.LocalIP, &d.WifiRSSI, &d.NodeRole)
 	return d, err
 }
 
