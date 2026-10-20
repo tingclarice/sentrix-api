@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"strconv"
 	"strings"
 	"time"
 
@@ -64,6 +65,33 @@ type Summary struct {
 	UnresolvedAlerts int `json:"unresolved_alerts"`
 }
 
+// Alert is an alert joined with its device, which is what a feed needs to show.
+type Alert struct {
+	ID           string    `json:"id"`
+	DeviceID     string    `json:"device_id"`
+	DeviceName   *string   `json:"device_name"`
+	DeviceMAC    string    `json:"device_mac"`
+	GroupID      string    `json:"group_id"`
+	Timestamp    time.Time `json:"timestamp"`
+	ActualValue  float64   `json:"actual_value"`
+	ExpectedMax  float64   `json:"expected_max"`
+	ExpectedMin  float64   `json:"expected_min"`
+	Severity     string    `json:"severity"`
+	IsResolved   bool      `json:"is_resolved"`
+	UserFeedback *bool     `json:"user_feedback"` // nil = not reviewed yet
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+// AlertFilter narrows ListAlerts. Zero values mean "no filter" except Limit.
+type AlertFilter struct {
+	Status   string // "unresolved" (default), "resolved" or "all"
+	GroupID  string
+	DeviceID string
+	Reviewed *bool      // true = has feedback, false = no feedback yet
+	Before   *time.Time // only alerts older than this, for paging
+	Limit    int
+}
+
 // Store is what the HTTP handlers need from the database.
 type Store interface {
 	CreateGroup(ctx context.Context, userID, name string, description *string) (Group, error)
@@ -86,6 +114,13 @@ type Store interface {
 	// forecast hours that are still in the future.
 	Bounds(ctx context.Context, deviceID string, from time.Time) ([]Bound, error)
 	Summary(ctx context.Context, userID string) (Summary, error)
+
+	// ListAlerts returns the user's alerts, newest first.
+	ListAlerts(ctx context.Context, userID string, f AlertFilter) ([]Alert, error)
+	// SetAlertFeedback and ResolveAlert return ErrNotFound unless the alert is on
+	// one of userID's devices.
+	SetAlertFeedback(ctx context.Context, alertID, userID string, realAnomaly bool) (Alert, error)
+	ResolveAlert(ctx context.Context, alertID, userID string) (Alert, error)
 }
 
 type PG struct{ db *pgxpool.Pool }
@@ -304,4 +339,97 @@ func (s *PG) Summary(ctx context.Context, userID string) (Summary, error) {
 		WHERE g.user_id = $1`, userID).
 		Scan(&sum.Anomalies24h, &sum.UnresolvedAlerts)
 	return sum, err
+}
+
+const alertCols = `a.id, a.device_id, d.name, d.mac_address, d.group_id, a."timestamp",
+	a.actual_value, a.expected_max, a.expected_min, a.severity::text,
+	a.is_resolved, a.user_feedback, a.created_at`
+
+func scanAlert(row pgx.Row) (Alert, error) {
+	var a Alert
+	err := row.Scan(&a.ID, &a.DeviceID, &a.DeviceName, &a.DeviceMAC, &a.GroupID, &a.Timestamp,
+		&a.ActualValue, &a.ExpectedMax, &a.ExpectedMin, &a.Severity,
+		&a.IsResolved, &a.UserFeedback, &a.CreatedAt)
+	return a, err
+}
+
+func (s *PG) ListAlerts(ctx context.Context, userID string, f AlertFilter) ([]Alert, error) {
+	where := []string{"g.user_id = $1"}
+	args := []any{userID}
+	add := func(cond string, v any) {
+		args = append(args, v)
+		where = append(where, strings.Replace(cond, "?", "$"+strconv.Itoa(len(args)), 1))
+	}
+	switch f.Status {
+	case "resolved":
+		where = append(where, "a.is_resolved")
+	case "all":
+	default:
+		where = append(where, "NOT a.is_resolved")
+	}
+	if f.GroupID != "" {
+		add("g.id = ?", f.GroupID)
+	}
+	if f.DeviceID != "" {
+		add("d.id = ?", f.DeviceID)
+	}
+	if f.Reviewed != nil {
+		if *f.Reviewed {
+			where = append(where, "a.user_feedback IS NOT NULL")
+		} else {
+			where = append(where, "a.user_feedback IS NULL")
+		}
+	}
+	if f.Before != nil {
+		add(`a."timestamp" < ?`, *f.Before)
+	}
+	args = append(args, f.Limit)
+
+	rows, err := s.db.Query(ctx, `
+		SELECT `+alertCols+`
+		FROM alerts a
+		JOIN devices d ON d.id = a.device_id
+		JOIN groups g ON g.id = d.group_id
+		WHERE `+strings.Join(where, " AND ")+`
+		ORDER BY a."timestamp" DESC, a.id
+		LIMIT $`+strconv.Itoa(len(args)), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	alerts := []Alert{}
+	for rows.Next() {
+		a, err := scanAlert(rows)
+		if err != nil {
+			return nil, err
+		}
+		alerts = append(alerts, a)
+	}
+	return alerts, rows.Err()
+}
+
+// updateAlert runs one UPDATE restricted to the user's own alerts and returns the
+// updated row with its device, or ErrNotFound.
+func (s *PG) updateAlert(ctx context.Context, set, alertID, userID string, extra ...any) (Alert, error) {
+	args := append([]any{alertID, userID}, extra...)
+	a, err := scanAlert(s.db.QueryRow(ctx, `
+		WITH upd AS (
+			UPDATE alerts SET `+set+`
+			WHERE id = $1 AND device_id IN (
+				SELECT d.id FROM devices d JOIN groups g ON g.id = d.group_id WHERE g.user_id = $2)
+			RETURNING *
+		)
+		SELECT `+alertCols+` FROM upd a JOIN devices d ON d.id = a.device_id`, args...))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Alert{}, ErrNotFound
+	}
+	return a, err
+}
+
+func (s *PG) SetAlertFeedback(ctx context.Context, alertID, userID string, realAnomaly bool) (Alert, error) {
+	return s.updateAlert(ctx, "user_feedback = $3", alertID, userID, realAnomaly)
+}
+
+func (s *PG) ResolveAlert(ctx context.Context, alertID, userID string) (Alert, error) {
+	return s.updateAlert(ctx, "is_resolved = true", alertID, userID)
 }
