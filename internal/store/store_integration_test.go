@@ -194,4 +194,82 @@ func TestPGAgainstRealDatabase(t *testing.T) {
 	if after.Anomalies24h != before.Anomalies24h+1 || after.UnresolvedAlerts != before.UnresolvedAlerts+1 {
 		t.Errorf("Summary alerts before %+v after %+v, want +1 each", before, after)
 	}
+
+	// Alert feed. Add an older second alert so ordering and paging can be checked.
+	if _, err := db.Exec(ctx, `INSERT INTO alerts (device_id, "timestamp", actual_value, expected_max, expected_min, severity)
+		VALUES ($1, now() - interval '2 hours', 1, 7, 3, 'WARNING')`, d.ID); err != nil {
+		t.Fatal(err)
+	}
+	mine := func(f AlertFilter) []Alert {
+		t.Helper()
+		f.DeviceID = d.ID // only this test's device, whatever else the user has
+		if f.Limit == 0 {
+			f.Limit = 50
+		}
+		alerts, err := s.ListAlerts(ctx, userID, f)
+		if err != nil {
+			t.Fatalf("ListAlerts(%+v): %v", f, err)
+		}
+		return alerts
+	}
+	feed := mine(AlertFilter{})
+	if len(feed) != 2 || feed[0].ActualValue != 15 || feed[1].ActualValue != 1 {
+		t.Fatalf("feed = %+v, want the 15A alert then the older 1A one", feed)
+	}
+	top := feed[0]
+	if top.DeviceMAC != mac || top.GroupID != g.ID || top.DeviceName == nil || *top.DeviceName != "Pump 1" ||
+		top.Severity != "WARNING" || top.IsResolved || top.UserFeedback != nil {
+		t.Errorf("alert = %+v, want device details, default severity, unresolved, no feedback", top)
+	}
+	if got := mine(AlertFilter{Limit: 1}); len(got) != 1 || got[0].ID != top.ID {
+		t.Errorf("limit 1 = %+v", got)
+	}
+	if got := mine(AlertFilter{Before: &top.Timestamp}); len(got) != 1 || got[0].ActualValue != 1 {
+		t.Errorf("before the newest = %+v, want only the older alert", got)
+	}
+
+	reviewedFalse := false
+	if got := mine(AlertFilter{Reviewed: &reviewedFalse}); len(got) != 2 {
+		t.Errorf("unreviewed = %d, want 2", len(got))
+	}
+	fb, err := s.SetAlertFeedback(ctx, top.ID, userID, false) // false alarm
+	if err != nil || fb.UserFeedback == nil || *fb.UserFeedback != false {
+		t.Fatalf("SetAlertFeedback = %+v, %v", fb, err)
+	}
+	reviewedTrue := true
+	if got := mine(AlertFilter{Reviewed: &reviewedTrue}); len(got) != 1 || got[0].ID != top.ID {
+		t.Errorf("reviewed = %+v, want just the alert with feedback", got)
+	}
+	if got := mine(AlertFilter{Reviewed: &reviewedFalse}); len(got) != 1 {
+		t.Errorf("unreviewed after feedback = %d, want 1", len(got))
+	}
+
+	res, err := s.ResolveAlert(ctx, top.ID, userID)
+	if err != nil || !res.IsResolved {
+		t.Fatalf("ResolveAlert = %+v, %v", res, err)
+	}
+	if got := mine(AlertFilter{}); len(got) != 1 { // default hides resolved
+		t.Errorf("unresolved after resolving = %d, want 1", len(got))
+	}
+	if got := mine(AlertFilter{Status: "resolved"}); len(got) != 1 || got[0].ID != top.ID {
+		t.Errorf("resolved = %+v", got)
+	}
+	if got := mine(AlertFilter{Status: "all"}); len(got) != 2 {
+		t.Errorf("all = %d, want 2", len(got))
+	}
+	if got := mine(AlertFilter{GroupID: g.ID, Status: "all"}); len(got) != 2 {
+		t.Errorf("by group = %d, want 2", len(got))
+	}
+
+	// Another user can neither see nor change these alerts.
+	stranger := "00000000-0000-0000-0000-000000000000"
+	if got, err := s.ListAlerts(ctx, stranger, AlertFilter{Status: "all", Limit: 50}); err != nil || len(got) != 0 {
+		t.Errorf("stranger's feed = %+v, %v, want empty", got, err)
+	}
+	if _, err := s.SetAlertFeedback(ctx, top.ID, stranger, true); !errors.Is(err, ErrNotFound) {
+		t.Errorf("stranger feedback: %v, want ErrNotFound", err)
+	}
+	if _, err := s.ResolveAlert(ctx, top.ID, stranger); !errors.Is(err, ErrNotFound) {
+		t.Errorf("stranger resolve: %v, want ErrNotFound", err)
+	}
 }

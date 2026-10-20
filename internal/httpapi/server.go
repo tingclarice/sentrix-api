@@ -70,6 +70,9 @@ func (s *Server) Handler() http.Handler {
 	authed("GET /api/devices/{id}/telemetry", s.deviceTelemetry)
 	authed("GET /api/devices/{id}/bounds", s.deviceBounds)
 	authed("GET /api/dashboard/summary", s.dashboardSummary)
+	authed("GET /api/alerts", s.listAlerts)
+	authed("PATCH /api/alerts/{id}/feedback", s.alertFeedback)
+	authed("PATCH /api/alerts/{id}/resolve", s.resolveAlert)
 
 	return s.recoverer(s.logger(s.cors(mux)))
 }

@@ -26,7 +26,11 @@ type fakeStore struct {
 	deviceOwners   map[string]string // device id -> owner, for the read endpoints
 	lastTelemetry  telemetryCall
 	lastBoundsFrom time.Time
-	claims         int // ClaimDevice calls, to check the limiter blocks before the store
+
+	alerts          []store.Alert
+	alertOwners     map[string]string // alert id -> owner
+	lastAlertFilter store.AlertFilter
+	claims          int // ClaimDevice calls, to check the limiter blocks before the store
 }
 
 func (f *fakeStore) GetGroup(_ context.Context, groupID, userID string) (store.Group, error) {
@@ -55,6 +59,44 @@ func (f *fakeStore) Bounds(_ context.Context, deviceID string, from time.Time) (
 
 func (f *fakeStore) Summary(_ context.Context, userID string) (store.Summary, error) {
 	return store.Summary{Groups: 2, Devices: 3, Active: 2, Calibrating: 1}, nil
+}
+
+func (f *fakeStore) ListAlerts(_ context.Context, userID string, flt store.AlertFilter) ([]store.Alert, error) {
+	f.lastAlertFilter = flt
+	out := []store.Alert{}
+	for _, a := range f.alerts {
+		if f.alertOwners[a.ID] == userID {
+			out = append(out, a)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeStore) SetAlertFeedback(_ context.Context, alertID, userID string, real bool) (store.Alert, error) {
+	a, ok := f.alertFor(alertID, userID)
+	if !ok {
+		return store.Alert{}, store.ErrNotFound
+	}
+	a.UserFeedback = &real
+	return a, nil
+}
+
+func (f *fakeStore) ResolveAlert(_ context.Context, alertID, userID string) (store.Alert, error) {
+	a, ok := f.alertFor(alertID, userID)
+	if !ok {
+		return store.Alert{}, store.ErrNotFound
+	}
+	a.IsResolved = true
+	return a, nil
+}
+
+func (f *fakeStore) alertFor(alertID, userID string) (store.Alert, bool) {
+	for _, a := range f.alerts {
+		if a.ID == alertID && f.alertOwners[alertID] == userID {
+			return a, true
+		}
+	}
+	return store.Alert{}, false
 }
 
 type telemetryCall struct {

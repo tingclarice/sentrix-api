@@ -30,8 +30,11 @@ The server verifies the token locally (signature, expiry, audience `authenticate
 | GET | `/api/devices/{id}/telemetry?range=1h\|24h\|7d` | yes | `200` chart points (default `24h`) |
 | GET | `/api/devices/{id}/bounds?range=1h\|24h\|7d` | yes | `200` predicted safe zone (default `24h`) |
 | GET | `/api/dashboard/summary` | yes | `200` overview counts |
+| GET | `/api/alerts` | yes | `200` array of alerts, newest first |
+| PATCH | `/api/alerts/{id}/feedback` | yes | `200` updated alert |
+| PATCH | `/api/alerts/{id}/resolve` | yes | `200` updated alert |
 
-Planned (see `sentrix-architecture.md` section 5.5): alerts (list, feedback, resolve) and push subscriptions.
+Planned (see `sentrix-architecture.md` section 5.5): Web Push subscriptions (`POST /api/push/subscribe`).
 
 Path IDs must be UUIDs. A malformed ID, a missing resource and someone else's resource all return the same `404`.
 
@@ -101,6 +104,40 @@ One entry per hour, from the start of the window (rounded down to the hour) to t
 ```
 
 Counts across all of the user's groups. `anomalies_24h` and `unresolved_alerts` come from the `alerts` table, which stays at 0 until the alert engine exists.
+
+### Alerts
+
+An alert is created by the server when an `ACTIVE` device stays outside its predicted bounds for 3 readings in a row (see `handoff.md` for the exact rules). The list endpoint returns alerts joined with their device:
+
+```jsonc
+{ "id": "uuid", "device_id": "uuid", "device_name": "Pump 1" /* or null */,
+  "device_mac": "AABBCCDDEEFF", "group_id": "uuid",
+  "timestamp": "2026-10-20T08:00:00Z",
+  "actual_value": 15, "expected_max": 7, "expected_min": 4,
+  "severity": "CRITICAL",        // WARNING or CRITICAL (INFO exists in the schema but is unused)
+  "is_resolved": false,
+  "user_feedback": null,         // null = not reviewed, true = real anomaly, false = false alarm
+  "created_at": "..." }
+```
+
+**GET /api/alerts** query parameters, all optional:
+
+| Param | Values | Default |
+|---|---|---|
+| `status` | `unresolved`, `resolved`, `all` | `unresolved` |
+| `group` | group UUID | any of your groups |
+| `device` | device UUID | any of your devices |
+| `reviewed` | `true` (has feedback) or `false` (no feedback yet) | both |
+| `limit` | 1 to 200 | 50 |
+| `before` | RFC 3339 timestamp; only alerts older than this | none |
+
+To page, pass the `timestamp` of the last alert you received as `before`. A bad value is `400`. A user with no alerts gets `[]`.
+
+**PATCH /api/alerts/{id}/feedback**: body `{"user_feedback": true}` or `{"user_feedback": false}`. `true` means a real anomaly, `false` a false alarm. The field is required; `null`, a missing field or a non-boolean is `400`. The answer is the updated alert, and sending it again overwrites the previous feedback. The "Alerts" page's True/False buttons use this.
+
+**PATCH /api/alerts/{id}/resolve**: no body. Marks the alert resolved (sending it again is harmless) and returns the updated alert. Resolved alerts disappear from the default list; use `status=resolved` or `all` to see them.
+
+An alert that is not yours, does not exist or has a malformed ID is `404`.
 
 ## Adding a route
 
