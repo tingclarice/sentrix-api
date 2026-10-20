@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/tingclarice/sentrix-api/internal/config"
+	"github.com/tingclarice/sentrix-api/internal/push"
 )
 
 // macPattern is the canonical MAC format: uppercase, 12 hex, no colons (architecture 5.2).
@@ -39,6 +40,7 @@ type Service struct {
 	devices  *deviceCache
 	bounds   *boundCache
 	breaches *breachTracker
+	notifier Notifier
 }
 
 func New(cfg config.Config, db *pgxpool.Pool) *Service {
@@ -49,6 +51,15 @@ func New(cfg config.Config, db *pgxpool.Pool) *Service {
 		breaches: newBreachTracker(),
 	}
 }
+
+// Notifier is told about each new alert, for example to send a Web Push. Notify must
+// return quickly: it is called on the ingest path.
+type Notifier interface {
+	Notify(push.Alert)
+}
+
+// SetNotifier sets who hears about new alerts. Call it before Connect.
+func (s *Service) SetNotifier(n Notifier) { s.notifier = n }
 
 // InvalidateDevice drops the cached copy of a device, for when something outside
 // ingest (the REST API) has changed its row.
@@ -114,8 +125,8 @@ func (s *Service) handleTelemetry(_ mqtt.Client, msg mqtt.Message) {
 func (s *Service) loadDevice(ctx context.Context, mac string) (device, error) {
 	var d device
 	err := s.db.QueryRow(ctx,
-		`SELECT id, status::text, calibration_ends_at FROM devices WHERE mac_address = $1`, mac,
-	).Scan(&d.ID, &d.Status, &d.CalibrationEndsAt)
+		`SELECT id, coalesce(name, ''), status::text, calibration_ends_at FROM devices WHERE mac_address = $1`, mac,
+	).Scan(&d.ID, &d.Name, &d.Status, &d.CalibrationEndsAt)
 	if err != nil {
 		return device{}, fmt.Errorf("unknown device: %w", err)
 	}
@@ -146,7 +157,7 @@ func (s *Service) processReading(ctx context.Context, r Reading) error {
 			s.maybeStartCalibration(ctx, r.MAC, dev.ID)
 		}
 	case "ACTIVE":
-		if err := s.checkAlert(ctx, dev.ID, r); err != nil {
+		if err := s.checkAlert(ctx, dev, r); err != nil {
 			log.Printf("alert check %s: %v", r.MAC, err)
 		}
 	}

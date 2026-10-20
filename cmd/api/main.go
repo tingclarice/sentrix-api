@@ -15,6 +15,7 @@ import (
 	"github.com/tingclarice/sentrix-api/internal/config"
 	"github.com/tingclarice/sentrix-api/internal/httpapi"
 	"github.com/tingclarice/sentrix-api/internal/ingest"
+	"github.com/tingclarice/sentrix-api/internal/push"
 	"github.com/tingclarice/sentrix-api/internal/store"
 )
 
@@ -44,7 +45,13 @@ func main() {
 		log.Fatalf("database: %v", err)
 	}
 
+	pg := store.NewPG(db)
 	ing := ingest.New(cfg, db)
+	if cfg.PushEnabled() {
+		ing.SetNotifier(push.New(pg, cfg.VAPIDPublicKey, cfg.VAPIDPrivateKey, cfg.VAPIDSubject))
+	} else {
+		log.Println("Web Push is disabled: set VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY and VAPID_SUBJECT to enable it")
+	}
 	client, err := ing.Connect()
 	if err != nil {
 		log.Fatal(err)
@@ -63,7 +70,7 @@ func main() {
 		Addr: ":" + cfg.HTTPPort,
 		Handler: httpapi.New(httpapi.Deps{
 			DB:                 db,
-			Store:              store.NewPG(db),
+			Store:              pg,
 			Auth:               auth,
 			AllowedOrigins:     cfg.AllowedOrigins,
 			CalibrationMinutes: cfg.CalibrationMinutes,

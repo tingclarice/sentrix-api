@@ -40,8 +40,8 @@ ESP32 -> MQTT broker -> **Go (this repo)** -> Supabase Postgres <- Python (train
 3. ~~`CALIBRATION_MINUTES`~~ Done: read in config and used by the claim endpoint.
 4. ~~No bounds check / alerts~~ Done in `internal/ingest/alerts.go`. For each ACTIVE device reading: skip readings under 0.1A (standby) and readings older than 10 minutes; skip if the hour has no bound; otherwise count consecutive breaches and insert an alert on the 3rd, once per run of breaches, with a 30 minute cooldown between alerts. Severity is CRITICAL when the reading is more than one band width outside the bounds, else WARNING. The streak counter is in memory (resets on restart). Alert REST routes (list, feedback, resolve) are done; Web Push is still to do.
 5. REST API: `/health`, `/api/me`, groups and device claim exist (with JWT check, ownership check and PIN rate limit; see `api.md`). Still missing: telemetry/bounds reads, alerts, push subscribe.
-6. No Web Push yet (needs VAPID keys + `push_subscriptions` table, which exists).
-7. Config still needs `SUPABASE_JWT_SECRET`, `VAPID_*`, `CALIBRATION_MINUTES` (arch section 11).
+6. ~~No Web Push yet~~ Done: `POST/DELETE /api/push/subscribe`, `internal/push` sends on each new alert, `go run ./cmd/vapidgen -env .env` creates the keys. To enable locally, generate the keys and set `VAPID_SUBJECT=mailto:<your contact>`; the frontend still needs a service worker (see `api.md`).
+7. ~~Config~~ Done: `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT`, `CALIBRATION_MINUTES`, `SUPABASE_URL` (and `SUPABASE_JWT_SECRET` for legacy projects) are all read.
 8. Schema defaults are DB-level (migration header says ids/timestamps/`updated_at` handled by DB triggers), so raw SQL inserts from Go are fine. Verify when adding the first alert insert.
 9. `OFFLINE` devices never return to `ACTIVE` and nothing sets `OFFLINE` (see architecture gotcha #13). Decide together with the handshake/`last_seen` design.
 10. `Subscribe` failures are logged but not retried; fine for now.

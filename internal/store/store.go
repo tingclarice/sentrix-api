@@ -92,6 +92,19 @@ type AlertFilter struct {
 	Limit    int
 }
 
+// PushSubscription is a browser's Web Push endpoint and the keys to encrypt for it.
+type PushSubscription struct {
+	Endpoint string
+	P256dh   string
+	Auth     string
+}
+
+// MaxPushSubscriptionsPerUser caps how many browsers one user can register.
+const MaxPushSubscriptionsPerUser = 20
+
+// ErrTooManySubscriptions is returned when a user is at MaxPushSubscriptionsPerUser.
+var ErrTooManySubscriptions = errors.New("too many push subscriptions")
+
 // Store is what the HTTP handlers need from the database.
 type Store interface {
 	CreateGroup(ctx context.Context, userID, name string, description *string) (Group, error)
@@ -121,6 +134,17 @@ type Store interface {
 	// one of userID's devices.
 	SetAlertFeedback(ctx context.Context, alertID, userID string, realAnomaly bool) (Alert, error)
 	ResolveAlert(ctx context.Context, alertID, userID string) (Alert, error)
+
+	// SavePushSubscription registers (or re-registers) a browser for userID. An
+	// endpoint already stored for another user moves to this one: it is the same
+	// browser after an account switch.
+	SavePushSubscription(ctx context.Context, userID string, sub PushSubscription) error
+	// DeletePushSubscription removes userID's subscription; a missing one is not an error.
+	DeletePushSubscription(ctx context.Context, userID, endpoint string) error
+	// PushSubscriptionsForDevice returns the subscriptions of the user who owns the device.
+	PushSubscriptionsForDevice(ctx context.Context, deviceID string) ([]PushSubscription, error)
+	// DeletePushSubscriptionByEndpoint drops a subscription the push service reported gone.
+	DeletePushSubscriptionByEndpoint(ctx context.Context, endpoint string) error
 }
 
 type PG struct{ db *pgxpool.Pool }
@@ -432,4 +456,56 @@ func (s *PG) SetAlertFeedback(ctx context.Context, alertID, userID string, realA
 
 func (s *PG) ResolveAlert(ctx context.Context, alertID, userID string) (Alert, error) {
 	return s.updateAlert(ctx, "is_resolved = true", alertID, userID)
+}
+
+func (s *PG) SavePushSubscription(ctx context.Context, userID string, sub PushSubscription) error {
+	var n int
+	err := s.db.QueryRow(ctx,
+		`SELECT count(*) FROM push_subscriptions WHERE user_id = $1 AND endpoint <> $2`,
+		userID, sub.Endpoint).Scan(&n)
+	if err != nil {
+		return err
+	}
+	if n >= MaxPushSubscriptionsPerUser {
+		return ErrTooManySubscriptions
+	}
+	_, err = s.db.Exec(ctx, `
+		INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth) VALUES ($1, $2, $3, $4)
+		ON CONFLICT (endpoint) DO UPDATE SET user_id = EXCLUDED.user_id,
+		                                     p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth`,
+		userID, sub.Endpoint, sub.P256dh, sub.Auth)
+	return err
+}
+
+func (s *PG) DeletePushSubscription(ctx context.Context, userID, endpoint string) error {
+	_, err := s.db.Exec(ctx,
+		`DELETE FROM push_subscriptions WHERE user_id = $1 AND endpoint = $2`, userID, endpoint)
+	return err
+}
+
+func (s *PG) PushSubscriptionsForDevice(ctx context.Context, deviceID string) ([]PushSubscription, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT ps.endpoint, ps.p256dh, ps.auth
+		FROM push_subscriptions ps
+		JOIN groups g ON g.user_id = ps.user_id
+		JOIN devices d ON d.group_id = g.id
+		WHERE d.id = $1`, deviceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var subs []PushSubscription
+	for rows.Next() {
+		var ps PushSubscription
+		if err := rows.Scan(&ps.Endpoint, &ps.P256dh, &ps.Auth); err != nil {
+			return nil, err
+		}
+		subs = append(subs, ps)
+	}
+	return subs, rows.Err()
+}
+
+func (s *PG) DeletePushSubscriptionByEndpoint(ctx context.Context, endpoint string) error {
+	_, err := s.db.Exec(ctx, `DELETE FROM push_subscriptions WHERE endpoint = $1`, endpoint)
+	return err
 }
