@@ -1,4 +1,4 @@
-// Package ingest subscribes to MQTT and writes telemetry to Postgres.
+// package ingest subscribes to MQTT and writes telemetry to Postgres.
 package ingest
 
 import (
@@ -9,7 +9,6 @@ import (
 	"log"
 	"net/http"
 	"regexp"
-	"strings"
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
@@ -35,12 +34,13 @@ type Payload struct {
 }
 
 type Service struct {
-	cfg config.Config
-	db  *pgxpool.Pool
+	cfg     config.Config
+	db      *pgxpool.Pool
+	devices *deviceCache
 }
 
 func New(cfg config.Config, db *pgxpool.Pool) *Service {
-	return &Service{cfg: cfg, db: db}
+	return &Service{cfg: cfg, db: db, devices: newDeviceCache(15 * time.Second)}
 }
 
 func (s *Service) Connect() (mqtt.Client, error) {
@@ -79,88 +79,83 @@ func (s *Service) Connect() (mqtt.Client, error) {
 }
 
 func (s *Service) handleHandshake(_ mqtt.Client, msg mqtt.Message) {
-	// TODO: verify MAC + PIN against devices and mark the device online (Flow 1, step 8).
+	// TO DO: verify MAC + PIN against devices and mark the device online (Flow 1, step 8).
 	log.Printf("handshake: %s", msg.Payload())
 }
 
 func (s *Service) handleTelemetry(_ mqtt.Client, msg mqtt.Message) {
-	var p Payload
-	if err := json.Unmarshal(msg.Payload(), &p); err != nil {
+	readings, rejected, err := parseTelemetry(msg.Topic(), msg.Payload())
+	if err != nil {
 		log.Printf("bad telemetry payload: %v", err)
 		return
 	}
-	readings := p.Readings
-	batched := len(readings) > 0
-	if !batched {
-		readings = []Reading{p.Reading}
+	for _, reason := range rejected {
+		log.Printf("telemetry: %s", reason)
 	}
-	// Topic is sentrix/telemetry/{mac}. Single readings must match it; batches come from
-	// the mesh root and carry leaf MACs, so they are exempt.
-	topicMAC := strings.ToUpper(msg.Topic()[strings.LastIndex(msg.Topic(), "/")+1:])
 	ctx := context.Background()
 	for _, r := range readings {
-		r.MAC = strings.ToUpper(r.MAC)
-		if !macPattern.MatchString(r.MAC) {
-			log.Printf("telemetry: invalid mac %q", r.MAC)
-			continue
-		}
-		if !batched && r.MAC != topicMAC {
-			log.Printf("telemetry: payload mac %s does not match topic mac %s", r.MAC, topicMAC)
-			continue
-		}
-		if r.TS <= 0 {
-			log.Printf("telemetry %s: missing or invalid ts", r.MAC)
-			continue
-		}
 		if err := s.processReading(ctx, r); err != nil {
 			log.Printf("telemetry %s: %v", r.MAC, err)
 		}
 	}
 }
 
-func (s *Service) processReading(ctx context.Context, r Reading) error {
-	var deviceID, status string
+func (s *Service) loadDevice(ctx context.Context, mac string) (device, error) {
+	var d device
 	err := s.db.QueryRow(ctx,
-		`SELECT id, status::text FROM devices WHERE mac_address = $1`, r.MAC,
-	).Scan(&deviceID, &status)
+		`SELECT id, status::text, calibration_ends_at FROM devices WHERE mac_address = $1`, mac,
+	).Scan(&d.ID, &d.Status, &d.CalibrationEndsAt)
 	if err != nil {
-		return fmt.Errorf("unknown device: %w", err)
+		return device{}, fmt.Errorf("unknown device: %w", err)
 	}
-	if status == "UNCLAIMED" {
+	return d, nil
+}
+
+func (s *Service) processReading(ctx context.Context, r Reading) error {
+	dev, err := s.devices.get(ctx, r.MAC, s.loadDevice)
+	if err != nil {
+		return err
+	}
+	if dev.Status == "UNCLAIMED" {
 		return nil
 	}
 
 	_, err = s.db.Exec(ctx,
 		`INSERT INTO telemetry (device_id, "timestamp", rms_current) VALUES ($1, $2, $3)
 		 ON CONFLICT DO NOTHING`,
-		deviceID, time.Unix(r.TS, 0), r.RMSCurrent)
+		dev.ID, time.Unix(r.TS, 0), r.RMSCurrent)
 	if err != nil {
 		return err
 	}
 
-	switch status {
+	switch dev.Status {
 	case "CALIBRATING":
-		s.maybeStartCalibration(ctx, deviceID)
+		// Only hit the database once the cached deadline has passed.
+		if dev.CalibrationEndsAt != nil && !dev.CalibrationEndsAt.After(time.Now()) {
+			s.maybeStartCalibration(ctx, r.MAC, dev.ID)
+		}
 	case "ACTIVE":
-		// TODO: check bounds, alert after 3 consecutive breaches (architecture 8.3).
+		// TO DO: check bounds, alert after 3 consecutive breaches (architecture 8.3).
 	}
 	return nil
 }
 
 // maybeStartCalibration flips CALIBRATING -> ACTIVE atomically; only one message
 // can win the UPDATE, so Python is never triggered twice.
-func (s *Service) maybeStartCalibration(ctx context.Context, deviceID string) {
+func (s *Service) maybeStartCalibration(ctx context.Context, mac, deviceID string) {
 	tag, err := s.db.Exec(ctx, `
 		UPDATE devices SET status = 'ACTIVE'
 		WHERE id = $1 AND status = 'CALIBRATING' AND calibration_ends_at <= now()`, deviceID)
 	if err != nil || tag.RowsAffected() == 0 {
 		return
 	}
+	s.devices.invalidate(mac)
 	go func() {
 		if err := s.triggerPython(deviceID); err != nil {
 			log.Printf("python trigger failed for %s: %v, reverting", deviceID, err)
 			s.db.Exec(context.Background(),
 				`UPDATE devices SET status = 'CALIBRATING' WHERE id = $1`, deviceID)
+			s.devices.invalidate(mac)
 		}
 	}()
 }
