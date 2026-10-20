@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"slices"
 	"time"
+
+	"github.com/tingclarice/sentrix-api/internal/store"
 )
 
 // Pinger is satisfied by *pgxpool.Pool; /health uses it to check the database.
@@ -15,14 +17,40 @@ type Pinger interface {
 	Ping(ctx context.Context) error
 }
 
-type Server struct {
-	db      Pinger
-	auth    *Verifier
-	origins []string
+// Deps are the things the Server needs; main wires the real ones, tests use fakes.
+type Deps struct {
+	DB                 Pinger
+	Store              store.Store
+	Auth               *Verifier
+	AllowedOrigins     []string
+	CalibrationMinutes int
+	// OnDeviceChanged is called with a device's MAC after the API changes its row, so
+	// the MQTT side can drop any cached copy.
+	OnDeviceChanged func(mac string)
 }
 
-func New(db Pinger, auth *Verifier, allowedOrigins []string) *Server {
-	return &Server{db: db, auth: auth, origins: allowedOrigins}
+type Server struct {
+	db                 Pinger
+	store              store.Store
+	auth               *Verifier
+	origins            []string
+	calibrationMinutes int
+	onDeviceChanged    func(mac string)
+	userLimiter        *failureLimiter
+	macLimiter         *failureLimiter
+}
+
+func New(d Deps) *Server {
+	return &Server{
+		db:                 d.DB,
+		store:              d.Store,
+		auth:               d.Auth,
+		origins:            d.AllowedOrigins,
+		calibrationMinutes: d.CalibrationMinutes,
+		onDeviceChanged:    d.OnDeviceChanged,
+		userLimiter:        newFailureLimiter(userMaxFails, 15*time.Minute),
+		macLimiter:         newFailureLimiter(macMaxFails, 15*time.Minute),
+	}
 }
 
 // Handler returns the router wrapped in recovery, logging and CORS.
@@ -30,7 +58,14 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /health", s.health)
-	mux.Handle("GET /api/me", s.auth.RequireAuth(http.HandlerFunc(s.me)))
+	authed := func(pattern string, h http.HandlerFunc) {
+		mux.Handle(pattern, s.auth.RequireAuth(h))
+	}
+	authed("GET /api/me", s.me)
+	authed("POST /api/groups", s.createGroup)
+	authed("GET /api/groups", s.listGroups)
+	authed("POST /api/groups/{id}/devices", s.claimDevice)
+	authed("GET /api/groups/{id}/devices", s.listDevices)
 
 	return s.recoverer(s.logger(s.cors(mux)))
 }

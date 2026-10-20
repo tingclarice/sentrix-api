@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -17,6 +18,9 @@ type Config struct {
 	// HTTP API.
 	HTTPPort       string
 	AllowedOrigins []string
+
+	// CalibrationMinutes is how long a newly claimed device calibrates (7 days = 10080).
+	CalibrationMinutes int
 
 	// Supabase JWT verification. Set SupabaseJWTSecret for projects that sign with
 	// the legacy shared secret (HS256), and SupabaseURL for projects that sign with
@@ -39,6 +43,11 @@ func Load() (Config, error) {
 		SupabaseURL:       strings.TrimRight(os.Getenv("SUPABASE_URL"), "/"),
 		SupabaseJWTSecret: os.Getenv("SUPABASE_JWT_SECRET"),
 	}
+	minutes, err := strconv.Atoi(envOr("CALIBRATION_MINUTES", "10080"))
+	if err != nil || minutes <= 0 {
+		return c, fmt.Errorf("CALIBRATION_MINUTES must be a positive integer")
+	}
+	c.CalibrationMinutes = minutes
 	if c.DatabaseURL == "" || c.MQTTBrokerURL == "" {
 		return c, fmt.Errorf("DATABASE_URL and MQTT_BROKER_URL are required")
 	}

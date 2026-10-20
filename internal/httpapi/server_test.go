@@ -53,7 +53,7 @@ func do(h http.Handler, method, path string, headers map[string]string) *httptes
 }
 
 func newHandler(v *Verifier, db Pinger) http.Handler {
-	return New(db, v, []string{"http://localhost:3000"}).Handler()
+	return New(Deps{DB: db, Auth: v, AllowedOrigins: []string{"http://localhost:3000"}}).Handler()
 }
 
 func TestHealth(t *testing.T) {

@@ -15,6 +15,7 @@ import (
 	"github.com/tingclarice/sentrix-api/internal/config"
 	"github.com/tingclarice/sentrix-api/internal/httpapi"
 	"github.com/tingclarice/sentrix-api/internal/ingest"
+	"github.com/tingclarice/sentrix-api/internal/store"
 )
 
 func main() {
@@ -43,7 +44,8 @@ func main() {
 		log.Fatalf("database: %v", err)
 	}
 
-	client, err := ingest.New(cfg, db).Connect()
+	ing := ingest.New(cfg, db)
+	client, err := ing.Connect()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -58,8 +60,15 @@ func main() {
 	}
 
 	srv := &http.Server{
-		Addr:              ":" + cfg.HTTPPort,
-		Handler:           httpapi.New(db, auth, cfg.AllowedOrigins).Handler(),
+		Addr: ":" + cfg.HTTPPort,
+		Handler: httpapi.New(httpapi.Deps{
+			DB:                 db,
+			Store:              store.NewPG(db),
+			Auth:               auth,
+			AllowedOrigins:     cfg.AllowedOrigins,
+			CalibrationMinutes: cfg.CalibrationMinutes,
+			OnDeviceChanged:    ing.InvalidateDevice,
+		}).Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	go func() {
