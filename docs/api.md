@@ -25,9 +25,15 @@ The server verifies the token locally (signature, expiry, audience `authenticate
 | POST | `/api/groups` | yes | `201` group |
 | GET | `/api/groups` | yes | `200` array of the user's groups (`[]` if none) |
 | POST | `/api/groups/{id}/devices` | yes | `200` device (claim) |
+| GET | `/api/groups/{id}` | yes | `200` group |
 | GET | `/api/groups/{id}/devices` | yes | `200` array of the group's devices |
+| GET | `/api/devices/{id}/telemetry?range=1h\|24h\|7d` | yes | `200` chart points (default `24h`) |
+| GET | `/api/devices/{id}/bounds?range=1h\|24h\|7d` | yes | `200` predicted safe zone (default `24h`) |
+| GET | `/api/dashboard/summary` | yes | `200` overview counts |
 
-Planned (see `sentrix-architecture.md` section 5.5): telemetry and bounds reads, alerts, push subscriptions.
+Planned (see `sentrix-architecture.md` section 5.5): alerts (list, feedback, resolve) and push subscriptions.
+
+Path IDs must be UUIDs. A malformed ID, a missing resource and someone else's resource all return the same `404`.
 
 ### Objects
 
@@ -68,6 +74,33 @@ Failed claims are limited to 5 per user and 20 per MAC every 15 minutes. The cou
 ### GET /api/groups/{id}/devices
 
 `404` if the group is not yours. Otherwise the array of devices in it.
+
+### GET /api/devices/{id}/telemetry
+
+```jsonc
+{ "range": "24h", "bucket_seconds": 300,
+  "points": [ { "timestamp": "2026-10-20T08:00:00Z", "rms_current": 4.1, "max_rms_current": 9.8 } ] }
+```
+
+`range=1h` returns raw one-minute readings (`bucket_seconds` is 0 and `max_rms_current` equals `rms_current`). `24h` averages into 5-minute buckets and `7d` into 15-minute buckets, so a chart gets at most about 700 points. In a bucketed point `rms_current` is the average and `max_rms_current` is the peak, so a short spike stays visible; draw the line from `rms_current` and mark peaks from `max_rms_current`. Points are in time order; gaps are not filled. A bad `range` is `400`.
+
+### GET /api/devices/{id}/bounds
+
+```jsonc
+{ "range": "24h",
+  "bounds": [ { "timestamp": "2026-10-20T08:00:00Z", "upper_bound": 7.2, "lower_bound": 3.1 } ] }
+```
+
+One entry per hour, from the start of the window (rounded down to the hour) to the last forecast hour, so it includes hours still in the future. Each bound applies to the whole hour starting at its `timestamp`. The array is empty until the device has finished calibration and the ML service has written bounds.
+
+### GET /api/dashboard/summary
+
+```json
+{ "groups": 2, "devices": 3, "calibrating": 1, "active": 2, "offline": 0,
+  "anomalies_24h": 0, "unresolved_alerts": 0 }
+```
+
+Counts across all of the user's groups. `anomalies_24h` and `unresolved_alerts` come from the `alerts` table, which stays at 0 until the alert engine exists.
 
 ## Adding a route
 

@@ -51,6 +51,10 @@ func requireUser(w http.ResponseWriter, r *http.Request) (string, bool) {
 // belongs to someone else gets the same 404 as one that does not exist.
 func (s *Server) ownedGroup(w http.ResponseWriter, r *http.Request, userID string) (string, bool) {
 	groupID := r.PathValue("id")
+	if !uuidPattern.MatchString(groupID) {
+		writeError(w, http.StatusNotFound, notFoundGroup)
+		return "", false
+	}
 	if err := s.store.GroupOwnedBy(r.Context(), groupID, userID); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			writeError(w, http.StatusNotFound, notFoundGroup)

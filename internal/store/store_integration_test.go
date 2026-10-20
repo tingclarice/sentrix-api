@@ -8,6 +8,7 @@ import (
 	"os"
 	"regexp"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -107,5 +108,90 @@ func TestPGAgainstRealDatabase(t *testing.T) {
 	devices, err := s.ListDevices(ctx, g.ID)
 	if err != nil || len(devices) != 1 || devices[0].MACAddress != mac {
 		t.Errorf("ListDevices = %+v, %v", devices, err)
+	}
+
+	// Read endpoints.
+	if got, err := s.GetGroup(ctx, g.ID, userID); err != nil || got.ID != g.ID {
+		t.Errorf("GetGroup = %+v, %v", got, err)
+	}
+	if _, err := s.GetGroup(ctx, g.ID, "00000000-0000-0000-0000-000000000000"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("GetGroup for another user: %v, want ErrNotFound", err)
+	}
+	if err := s.DeviceOwnedBy(ctx, d.ID, userID); err != nil {
+		t.Errorf("DeviceOwnedBy owner: %v", err)
+	}
+	if err := s.DeviceOwnedBy(ctx, d.ID, "00000000-0000-0000-0000-000000000000"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("DeviceOwnedBy another user: %v, want ErrNotFound", err)
+	}
+
+	// 120 readings, one a minute, with one spike; ends a minute ago.
+	base := time.Now().Truncate(time.Minute).Add(-120 * time.Minute)
+	for i := 0; i < 120; i++ {
+		amps := 4.0
+		if i == 100 {
+			amps = 15
+		}
+		if _, err := db.Exec(ctx, `INSERT INTO telemetry (device_id, "timestamp", rms_current) VALUES ($1, $2, $3)`,
+			d.ID, base.Add(time.Duration(i)*time.Minute), amps); err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw, err := s.Telemetry(ctx, d.ID, time.Now().Add(-time.Hour), 0)
+	if err != nil || len(raw) < 55 || len(raw) > 61 {
+		t.Errorf("raw last hour: %d points, %v, want about 60", len(raw), err)
+	}
+	for i := 1; i < len(raw); i++ {
+		if raw[i].Timestamp.Before(raw[i-1].Timestamp) {
+			t.Fatal("raw points are not in time order")
+		}
+	}
+	bucketed, err := s.Telemetry(ctx, d.ID, base.Add(-time.Minute), 15*time.Minute)
+	if err != nil || len(bucketed) < 8 || len(bucketed) > 10 {
+		t.Fatalf("15 minute buckets over 2h: %d points, %v, want 8-9", len(bucketed), err)
+	}
+	peak := 0.0
+	for _, p := range bucketed {
+		if p.MaxRMSCurrent > peak {
+			peak = p.MaxRMSCurrent
+		}
+		if p.RMSCurrent > p.MaxRMSCurrent {
+			t.Errorf("bucket average %.2f above its max %.2f", p.RMSCurrent, p.MaxRMSCurrent)
+		}
+	}
+	if peak != 15 {
+		t.Errorf("bucketed max = %.1f, want the 15A spike to survive averaging", peak)
+	}
+
+	// Bounds: one past hour, one future hour.
+	hour := time.Now().Truncate(time.Hour)
+	for _, h := range []time.Duration{-3 * time.Hour, 5 * time.Hour} {
+		if _, err := db.Exec(ctx, `INSERT INTO prediction_bounds (device_id, "timestamp", upper_bound, lower_bound) VALUES ($1, $2, 7, 3)`,
+			d.ID, hour.Add(h)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bounds, err := s.Bounds(ctx, d.ID, hour.Add(-time.Hour))
+	if err != nil || len(bounds) != 1 || !bounds[0].Timestamp.Equal(hour.Add(5*time.Hour)) || bounds[0].UpperBound != 7 {
+		t.Errorf("Bounds from 1h ago = %+v, %v, want only the future hour", bounds, err)
+	}
+	if all, _ := s.Bounds(ctx, d.ID, hour.Add(-4*time.Hour)); len(all) != 2 {
+		t.Errorf("Bounds from 4h ago = %d rows, want 2", len(all))
+	}
+
+	// Summary counts the new CALIBRATING device and an unresolved alert from now.
+	before, err := s.Summary(ctx, userID)
+	if err != nil {
+		t.Fatalf("Summary: %v", err)
+	}
+	if before.Devices < 1 || before.Calibrating < 1 || before.Groups < 1 {
+		t.Errorf("Summary = %+v, want at least this group and device", before)
+	}
+	if _, err := db.Exec(ctx, `INSERT INTO alerts (device_id, "timestamp", actual_value, expected_max, expected_min)
+		VALUES ($1, now(), 15, 7, 3)`, d.ID); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := s.Summary(ctx, userID)
+	if after.Anomalies24h != before.Anomalies24h+1 || after.UnresolvedAlerts != before.UnresolvedAlerts+1 {
+		t.Errorf("Summary alerts before %+v after %+v, want +1 each", before, after)
 	}
 }
