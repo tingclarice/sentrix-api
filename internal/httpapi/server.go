@@ -65,7 +65,11 @@ func (s *Server) Handler() http.Handler {
 	authed("POST /api/groups", s.createGroup)
 	authed("GET /api/groups", s.listGroups)
 	authed("POST /api/groups/{id}/devices", s.claimDevice)
+	authed("GET /api/groups/{id}", s.getGroup)
 	authed("GET /api/groups/{id}/devices", s.listDevices)
+	authed("GET /api/devices/{id}/telemetry", s.deviceTelemetry)
+	authed("GET /api/devices/{id}/bounds", s.deviceBounds)
+	authed("GET /api/dashboard/summary", s.dashboardSummary)
 
 	return s.recoverer(s.logger(s.cors(mux)))
 }

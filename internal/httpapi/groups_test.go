@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -21,7 +22,45 @@ type fakeStore struct {
 	groups  map[string]string // group id -> owner
 	devices map[string]*fakeDevice
 	nextID  int
-	claims  int // ClaimDevice calls, to check the limiter blocks before the store
+
+	deviceOwners   map[string]string // device id -> owner, for the read endpoints
+	lastTelemetry  telemetryCall
+	lastBoundsFrom time.Time
+	claims         int // ClaimDevice calls, to check the limiter blocks before the store
+}
+
+func (f *fakeStore) GetGroup(_ context.Context, groupID, userID string) (store.Group, error) {
+	if f.groups[groupID] != userID {
+		return store.Group{}, store.ErrNotFound
+	}
+	return store.Group{ID: groupID, Name: "detail", MeshID: "0123456789AB"}, nil
+}
+
+func (f *fakeStore) DeviceOwnedBy(_ context.Context, deviceID, userID string) error {
+	if f.deviceOwners[deviceID] != userID {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+func (f *fakeStore) Telemetry(_ context.Context, deviceID string, since time.Time, bucket time.Duration) ([]store.TelemetryPoint, error) {
+	f.lastTelemetry = telemetryCall{deviceID, since, bucket}
+	return []store.TelemetryPoint{{Timestamp: since, RMSCurrent: 4, MaxRMSCurrent: 9}}, nil
+}
+
+func (f *fakeStore) Bounds(_ context.Context, deviceID string, from time.Time) ([]store.Bound, error) {
+	f.lastBoundsFrom = from
+	return []store.Bound{{Timestamp: from, UpperBound: 7, LowerBound: 3}}, nil
+}
+
+func (f *fakeStore) Summary(_ context.Context, userID string) (store.Summary, error) {
+	return store.Summary{Groups: 2, Devices: 3, Active: 2, Calibrating: 1}, nil
+}
+
+type telemetryCall struct {
+	deviceID string
+	since    time.Time
+	bucket   time.Duration
 }
 
 type fakeDevice struct {
@@ -31,7 +70,7 @@ type fakeDevice struct {
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
-		groups: map[string]string{"g-alice": "alice", "g-bob": "bob"},
+		groups: map[string]string{gAlice: "alice", gBob: "bob"},
 		devices: map[string]*fakeDevice{
 			"AABBCCDDEEFF": {Device: store.Device{ID: "d1", MACAddress: "AABBCCDDEEFF", Status: "UNCLAIMED"}, pin: "123456"},
 		},
@@ -84,6 +123,11 @@ func (f *fakeStore) ListDevices(_ context.Context, groupID string) ([]store.Devi
 	return out, nil
 }
 
+const (
+	gAlice = "aaaaaaaa-0000-0000-0000-000000000001"
+	gBob   = "bbbbbbbb-0000-0000-0000-000000000001"
+)
+
 type apiTest struct {
 	h       http.Handler
 	store   *fakeStore
@@ -121,7 +165,7 @@ func TestGroupRoutesNeedAuth(t *testing.T) {
 	a := newAPITest(t)
 	for _, route := range []struct{ method, path string }{
 		{"POST", "/api/groups"}, {"GET", "/api/groups"},
-		{"POST", "/api/groups/g-alice/devices"}, {"GET", "/api/groups/g-alice/devices"},
+		{"POST", "/api/groups/" + gAlice + "/devices"}, {"GET", "/api/groups/" + gAlice + "/devices"},
 	} {
 		if got := a.as(t, "", route.method, route.path, "{}").Code; got != http.StatusUnauthorized {
 			t.Errorf("%s %s without a token: %d, want 401", route.method, route.path, got)
@@ -151,7 +195,7 @@ func TestCreateAndListGroups(t *testing.T) {
 	rec = a.as(t, "alice", "GET", "/api/groups", "")
 	var list []store.Group
 	json.Unmarshal(rec.Body.Bytes(), &list)
-	if len(list) != 2 { // seeded g-alice + the one just created
+	if len(list) != 2 { // seeded gAlice + the one just created
 		t.Errorf("alice sees %d groups, want 2: %s", len(list), rec.Body)
 	}
 	rec = a.as(t, "carol", "GET", "/api/groups", "")
@@ -164,7 +208,7 @@ func TestClaimDevice(t *testing.T) {
 	a := newAPITest(t)
 	claim := `{"mac":"aabbccddeeff","pin":"123456","name":"Pump 1"}`
 
-	rec := a.as(t, "alice", "POST", "/api/groups/g-alice/devices", claim)
+	rec := a.as(t, "alice", "POST", "/api/groups/"+gAlice+"/devices", claim)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("claim: %d %s", rec.Code, rec.Body)
 	}
@@ -184,11 +228,11 @@ func TestClaimDevice(t *testing.T) {
 	}
 
 	// Already claimed: same answer as a wrong PIN.
-	if got := a.as(t, "alice", "POST", "/api/groups/g-alice/devices", claim).Code; got != http.StatusNotFound {
+	if got := a.as(t, "alice", "POST", "/api/groups/"+gAlice+"/devices", claim).Code; got != http.StatusNotFound {
 		t.Errorf("claiming twice: %d, want 404", got)
 	}
 
-	rec = a.as(t, "alice", "GET", "/api/groups/g-alice/devices", "")
+	rec = a.as(t, "alice", "GET", "/api/groups/"+gAlice+"/devices", "")
 	var list []store.Device
 	json.Unmarshal(rec.Body.Bytes(), &list)
 	if len(list) != 1 || list[0].MACAddress != "AABBCCDDEEFF" {
@@ -205,7 +249,7 @@ func TestClaimValidation(t *testing.T) {
 		`{"mac":"AABBCCDDEEFF"}`,
 		`nope`,
 	} {
-		if got := a.as(t, "alice", "POST", "/api/groups/g-alice/devices", body).Code; got != http.StatusBadRequest {
+		if got := a.as(t, "alice", "POST", "/api/groups/"+gAlice+"/devices", body).Code; got != http.StatusBadRequest {
 			t.Errorf("claim with %q: %d, want 400", body, got)
 		}
 	}
@@ -217,7 +261,7 @@ func TestClaimValidation(t *testing.T) {
 func TestOtherUsersGroupIsNotFound(t *testing.T) {
 	a := newAPITest(t)
 	// bob's group, alice's token: same 404 as a group that does not exist.
-	for _, path := range []string{"/api/groups/g-bob/devices", "/api/groups/nope/devices"} {
+	for _, path := range []string{"/api/groups/" + gBob + "/devices", "/api/groups/nope/devices"} {
 		if got := a.as(t, "alice", "GET", path, "").Code; got != http.StatusNotFound {
 			t.Errorf("GET %s: %d, want 404", path, got)
 		}
@@ -234,14 +278,14 @@ func TestPINBruteForceIsLimitedPerUser(t *testing.T) {
 	a := newAPITest(t)
 	wrong := `{"mac":"AABBCCDDEEFF","pin":"000000"}`
 	for i := 0; i < userMaxFails; i++ {
-		if got := a.as(t, "alice", "POST", "/api/groups/g-alice/devices", wrong).Code; got != http.StatusNotFound {
+		if got := a.as(t, "alice", "POST", "/api/groups/"+gAlice+"/devices", wrong).Code; got != http.StatusNotFound {
 			t.Fatalf("attempt %d: %d, want 404", i+1, got)
 		}
 	}
 
 	// The next attempt is blocked, even with the right PIN, and never reaches the store.
 	before := a.store.claims
-	rec := a.as(t, "alice", "POST", "/api/groups/g-alice/devices", `{"mac":"AABBCCDDEEFF","pin":"123456"}`)
+	rec := a.as(t, "alice", "POST", "/api/groups/"+gAlice+"/devices", `{"mac":"AABBCCDDEEFF","pin":"123456"}`)
 	if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") == "" {
 		t.Errorf("after %d failures: %d (Retry-After %q), want 429 with Retry-After", userMaxFails, rec.Code, rec.Header().Get("Retry-After"))
 	}
@@ -250,7 +294,7 @@ func TestPINBruteForceIsLimitedPerUser(t *testing.T) {
 	}
 
 	// One user's failures do not lock the real owner out of the device.
-	if got := a.as(t, "bob", "POST", "/api/groups/g-bob/devices", `{"mac":"AABBCCDDEEFF","pin":"123456"}`).Code; got != http.StatusOK {
+	if got := a.as(t, "bob", "POST", "/api/groups/"+gBob+"/devices", `{"mac":"AABBCCDDEEFF","pin":"123456"}`).Code; got != http.StatusOK {
 		t.Errorf("another user with the right PIN: %d, want 200", got)
 	}
 }
@@ -261,10 +305,11 @@ func TestPINBruteForceIsLimitedPerMAC(t *testing.T) {
 	// Many accounts each stay under their own limit but share the MAC's budget.
 	for i := 0; i < macMaxFails; i++ {
 		user := "attacker-" + string(rune('a'+i/userMaxFails))
-		a.store.groups["g-"+user] = user
-		a.as(t, user, "POST", "/api/groups/g-"+user+"/devices", wrong)
+		group := fmt.Sprintf("cccccccc-0000-0000-0000-%012d", i/userMaxFails)
+		a.store.groups[group] = user
+		a.as(t, user, "POST", "/api/groups/"+group+"/devices", wrong)
 	}
-	rec := a.as(t, "bob", "POST", "/api/groups/g-bob/devices", `{"mac":"AABBCCDDEEFF","pin":"123456"}`)
+	rec := a.as(t, "bob", "POST", "/api/groups/"+gBob+"/devices", `{"mac":"AABBCCDDEEFF","pin":"123456"}`)
 	if rec.Code != http.StatusTooManyRequests {
 		t.Errorf("after %d failures on one MAC from several users: %d, want 429", macMaxFails, rec.Code)
 	}

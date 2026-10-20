@@ -38,6 +38,32 @@ type Device struct {
 	CreatedAt            time.Time  `json:"created_at"`
 }
 
+// TelemetryPoint is one chart point. Raw readings have MaxRMSCurrent equal to
+// RMSCurrent; bucketed points carry the bucket's average and its peak, so a short
+// spike is still visible in a long range.
+type TelemetryPoint struct {
+	Timestamp     time.Time `json:"timestamp"`
+	RMSCurrent    float64   `json:"rms_current"`
+	MaxRMSCurrent float64   `json:"max_rms_current"`
+}
+
+type Bound struct {
+	Timestamp  time.Time `json:"timestamp"`
+	UpperBound float64   `json:"upper_bound"`
+	LowerBound float64   `json:"lower_bound"`
+}
+
+// Summary is the dashboard overview for one user.
+type Summary struct {
+	Groups           int `json:"groups"`
+	Devices          int `json:"devices"`
+	Calibrating      int `json:"calibrating"`
+	Active           int `json:"active"`
+	Offline          int `json:"offline"`
+	Anomalies24h     int `json:"anomalies_24h"`
+	UnresolvedAlerts int `json:"unresolved_alerts"`
+}
+
 // Store is what the HTTP handlers need from the database.
 type Store interface {
 	CreateGroup(ctx context.Context, userID, name string, description *string) (Group, error)
@@ -48,6 +74,18 @@ type Store interface {
 	// and starts calibration. It returns ErrNotFound if nothing matches.
 	ClaimDevice(ctx context.Context, groupID, mac, pin string, name *string, calibrationMinutes int) (Device, error)
 	ListDevices(ctx context.Context, groupID string) ([]Device, error)
+
+	// GetGroup returns ErrNotFound unless the group exists and belongs to userID.
+	GetGroup(ctx context.Context, groupID, userID string) (Group, error)
+	// DeviceOwnedBy returns ErrNotFound unless the device is in one of userID's groups.
+	DeviceOwnedBy(ctx context.Context, deviceID, userID string) error
+	// Telemetry returns readings since the given time. bucket == 0 returns raw
+	// readings; otherwise they are averaged into buckets of that size.
+	Telemetry(ctx context.Context, deviceID string, since time.Time, bucket time.Duration) ([]TelemetryPoint, error)
+	// Bounds returns predicted bounds from the given time onwards, including the
+	// forecast hours that are still in the future.
+	Bounds(ctx context.Context, deviceID string, from time.Time) ([]Bound, error)
+	Summary(ctx context.Context, userID string) (Summary, error)
 }
 
 type PG struct{ db *pgxpool.Pool }
@@ -169,4 +207,101 @@ func (s *PG) ListDevices(ctx context.Context, groupID string) ([]Device, error) 
 		devices = append(devices, d)
 	}
 	return devices, rows.Err()
+}
+
+func (s *PG) GetGroup(ctx context.Context, groupID, userID string) (Group, error) {
+	g, err := scanGroup(s.db.QueryRow(ctx,
+		`SELECT `+groupCols+` FROM groups WHERE id = $1 AND user_id = $2`, groupID, userID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Group{}, ErrNotFound
+	}
+	return g, err
+}
+
+func (s *PG) DeviceOwnedBy(ctx context.Context, deviceID, userID string) error {
+	var one int
+	err := s.db.QueryRow(ctx, `
+		SELECT 1 FROM devices d JOIN groups g ON g.id = d.group_id
+		WHERE d.id = $1 AND g.user_id = $2`, deviceID, userID).Scan(&one)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
+	return err
+}
+
+func (s *PG) Telemetry(ctx context.Context, deviceID string, since time.Time, bucket time.Duration) ([]TelemetryPoint, error) {
+	var (
+		rows pgx.Rows
+		err  error
+	)
+	if bucket <= 0 {
+		rows, err = s.db.Query(ctx, `
+			SELECT "timestamp", rms_current, rms_current FROM telemetry
+			WHERE device_id = $1 AND "timestamp" >= $2 ORDER BY "timestamp"`, deviceID, since)
+	} else {
+		rows, err = s.db.Query(ctx, `
+			SELECT date_bin(make_interval(secs => $3::int), "timestamp", TIMESTAMPTZ '2001-01-01') AS ts,
+			       avg(rms_current), max(rms_current)
+			FROM telemetry
+			WHERE device_id = $1 AND "timestamp" >= $2
+			GROUP BY ts ORDER BY ts`, deviceID, since, int(bucket.Seconds()))
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	points := []TelemetryPoint{}
+	for rows.Next() {
+		var p TelemetryPoint
+		if err := rows.Scan(&p.Timestamp, &p.RMSCurrent, &p.MaxRMSCurrent); err != nil {
+			return nil, err
+		}
+		points = append(points, p)
+	}
+	return points, rows.Err()
+}
+
+func (s *PG) Bounds(ctx context.Context, deviceID string, from time.Time) ([]Bound, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT "timestamp", upper_bound, lower_bound FROM prediction_bounds
+		WHERE device_id = $1 AND "timestamp" >= $2 ORDER BY "timestamp"`, deviceID, from)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	bounds := []Bound{}
+	for rows.Next() {
+		var b Bound
+		if err := rows.Scan(&b.Timestamp, &b.UpperBound, &b.LowerBound); err != nil {
+			return nil, err
+		}
+		bounds = append(bounds, b)
+	}
+	return bounds, rows.Err()
+}
+
+func (s *PG) Summary(ctx context.Context, userID string) (Summary, error) {
+	var sum Summary
+	err := s.db.QueryRow(ctx, `
+		SELECT
+		  (SELECT count(*) FROM groups WHERE user_id = $1),
+		  count(d.id),
+		  count(d.id) FILTER (WHERE d.status = 'CALIBRATING'),
+		  count(d.id) FILTER (WHERE d.status = 'ACTIVE'),
+		  count(d.id) FILTER (WHERE d.status = 'OFFLINE')
+		FROM devices d JOIN groups g ON g.id = d.group_id
+		WHERE g.user_id = $1`, userID).
+		Scan(&sum.Groups, &sum.Devices, &sum.Calibrating, &sum.Active, &sum.Offline)
+	if err != nil {
+		return Summary{}, err
+	}
+	err = s.db.QueryRow(ctx, `
+		SELECT count(*) FILTER (WHERE a."timestamp" >= now() - interval '24 hours'),
+		       count(*) FILTER (WHERE NOT a.is_resolved)
+		FROM alerts a
+		JOIN devices d ON d.id = a.device_id
+		JOIN groups g ON g.id = d.group_id
+		WHERE g.user_id = $1`, userID).
+		Scan(&sum.Anomalies24h, &sum.UnresolvedAlerts)
+	return sum, err
 }
