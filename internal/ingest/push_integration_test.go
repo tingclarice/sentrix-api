@@ -101,7 +101,7 @@ func TestAlertSendsPushEndToEnd(t *testing.T) {
 	feed := func(minsAgo int, amps float64) {
 		t.Helper()
 		r := Reading{MAC: mac, RMSCurrent: amps, TS: time.Now().Add(-time.Duration(minsAgo) * time.Minute).Unix()}
-		if err := ing.processReading(ctx, r); err != nil {
+		if err := ing.processReading(ctx, r, ""); err != nil {
 			t.Fatal(err)
 		}
 	}

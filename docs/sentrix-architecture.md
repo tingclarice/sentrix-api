@@ -170,43 +170,32 @@ The IoT team does **not** need a Go endpoint. They need broker details:
 |---|---|
 | Broker host + port | `xxxx.s1.eu.hivemq.cloud:8883` (TLS) |
 | Username / password | Device credential (store in ESP32 NVS or firmware config) |
-| Handshake topic | `sentrix/handshake` |
-| Telemetry topic | `sentrix/telemetry/{mac}` |
+| Handshake topic | `sentrix/auth/{mac}/connect` |
+| Data recording topic | `sentrix/dt/{mesh_id}/batch` |
 | QoS | 1 |
 
-### 5.2 MAC format (pick one)
+### 5.2 MAC format
 
-Use **uppercase, 12 hex characters, no colons** everywhere (topic, payload, database): `AABBCCDDEEFF`.
+The IoT team writes MACs with colons (`AA:BB:CC:DD:EE:00`) in topics and payloads. Go normalizes every MAC (any case, `:` or `-`) to **uppercase, 12 hex characters, no colons** (`AABBCCDDEE00`) before it touches the database.
 
-### 5.3 MQTT topics
+### 5.3 MQTT topics (decided: the IoT team's format)
 
 | Topic | Publisher | Subscriber | Purpose |
 |---|---|---|---|
-| `sentrix/handshake` | ESP32 (root) | Go | Prove identity after joining Wi-Fi |
-| `sentrix/telemetry/{mac}` | ESP32 (root) | Go (`sentrix/telemetry/+`) | 1-minute RMS reading |
+| `sentrix/auth/{mac}/connect` | every ESP32 node (children via the root) | Go (`sentrix/auth/+/connect`) | Handshake: prove identity, report firmware/IP/RSSI |
+| `sentrix/dt/{mesh_id}/batch` | the mesh root | Go (`sentrix/dt/+/batch`) | Data recording, once a minute for the whole mesh |
 
-**Mesh note:** only the root node has internet. It publishes on behalf of leaf nodes, so the `{mac}` in the topic and payload must be the **originating node's** MAC, not the root's.
+**Mesh note:** only the root node has internet. It publishes the batch for the whole mesh; each reading carries its own node's MAC.
 
 ### 5.4 Payloads
 
-Handshake:
-```json
-{ "mac": "AABBCCDDEEFF", "pin": "123456" }
-```
+The complete, current definition (every field, validation rules, what Go does with each case) is in **`esp32-mqtt-examples.md`**. In short:
 
-Telemetry (one reading):
-```json
-{ "mac": "AABBCCDDEEFF", "rms_current": 5.2, "ts": 1760421000 }
-```
+Handshake: `mac_address`, `device_pin` (6-digit string), `mesh_id`, `role`, `firmware_version`, `local_ip`, `wifi_rssi`, `timestamp`.
 
-Batched (root pools leaf data):
-```json
-{ "readings": [
-  { "mac": "AABBCCDDEEFF", "rms_current": 5.2, "ts": 1760421000 },
-  { "mac": "112233445566", "rms_current": 0.4, "ts": 1760421000 }
-] }
-```
-`ts` is a Unix timestamp in seconds from NTP-synced time. Decide single vs batched now, and have Go handle whichever is chosen.
+Data recording: `mesh_id`, `timestamp` (Unix seconds, applies to all readings), `root_mac`, `readings[]` (`mac`, `node_type`, `rms_current`, `current_temperature`, `target_temperature`) and `offline_nodes[]`.
+
+The `mesh_id` is the 12-hex-character value Go generates when a group is created and the web app writes to the ESP32 over Bluetooth. Go drops readings whose `mesh_id` does not match the device's group.
 
 ### 5.5 Go REST API (for Next.js)
 

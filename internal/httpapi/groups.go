@@ -153,9 +153,10 @@ func (s *Server) claimDevice(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	mac := strings.ToUpper(strings.TrimSpace(req.MAC))
+	// The sticker and the firmware write AA:BB:CC:DD:EE:FF; the database stores AABBCCDDEEFF.
+	mac := strings.ToUpper(strings.NewReplacer(":", "", "-", "").Replace(strings.TrimSpace(req.MAC)))
 	if !macPattern.MatchString(mac) {
-		writeError(w, http.StatusBadRequest, "mac must be 12 hex characters without colons, e.g. AABBCCDDEEFF")
+		writeError(w, http.StatusBadRequest, "mac must be 12 hex characters, e.g. AABBCCDDEEFF or AA:BB:CC:DD:EE:FF")
 		return
 	}
 	if !pinPattern.MatchString(req.PIN) {

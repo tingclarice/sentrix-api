@@ -323,7 +323,8 @@ func TestClaimDevice(t *testing.T) {
 func TestClaimValidation(t *testing.T) {
 	a := newAPITest(t)
 	for _, body := range []string{
-		`{"mac":"AA:BB:CC:DD:EE:FF","pin":"123456"}`,
+		`{"mac":"AA:BB:CC:DD:EE","pin":"123456"}`,
+		`{"mac":"AABBCCDDEEFFAA","pin":"123456"}`,
 		`{"mac":"AABBCCDDEEFF","pin":"12345"}`,
 		`{"mac":"AABBCCDDEEFF","pin":"abcdef"}`,
 		`{"mac":"AABBCCDDEEFF"}`,
@@ -411,5 +412,16 @@ func TestFailureLimiterWindow(t *testing.T) {
 	clock = clock.Add(61 * time.Second)
 	if ok, _ := l.allow("k"); !ok {
 		t.Error("failures older than the window must expire")
+	}
+}
+
+func TestClaimAcceptsAMACWrittenWithColons(t *testing.T) {
+	a := newAPITest(t)
+	for _, mac := range []string{"AA:BB:CC:DD:EE:FF", "aa-bb-cc-dd-ee-ff"} {
+		a = newAPITest(t) // a fresh unclaimed device each time
+		body := `{"mac":"` + mac + `","pin":"123456"}`
+		if got := a.as(t, "alice", "POST", "/api/groups/"+gAlice+"/devices", body).Code; got != http.StatusOK {
+			t.Errorf("claim with mac %q: %d, want 200", mac, got)
+		}
 	}
 }
