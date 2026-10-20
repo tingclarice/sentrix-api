@@ -43,6 +43,10 @@ func New(cfg config.Config, db *pgxpool.Pool) *Service {
 	return &Service{cfg: cfg, db: db, devices: newDeviceCache(15 * time.Second)}
 }
 
+// InvalidateDevice drops the cached copy of a device, for when something outside
+// ingest (the REST API) has changed its row.
+func (s *Service) InvalidateDevice(mac string) { s.devices.invalidate(mac) }
+
 func (s *Service) Connect() (mqtt.Client, error) {
 	opts := mqtt.NewClientOptions().
 		AddBroker(s.cfg.MQTTBrokerURL).

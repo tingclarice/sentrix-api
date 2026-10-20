@@ -37,9 +37,9 @@ ESP32 -> MQTT broker -> **Go (this repo)** -> Supabase Postgres <- Python (train
 
 1. `ON CONFLICT DO NOTHING` on the telemetry insert is a no-op: schema has no unique key on `telemetry(device_id, timestamp)`. Fixed by the migration `20261018000000_telemetry_unique_device_timestamp.sql` in `sentrix-web` (branch `unique-telemetry-bounds`). Once it is merged and applied to Supabase, this gap is closed.
 2. `handleHandshake` is a stub. Needs to verify MAC + PIN (Flow 1 step 8) and mark the device online. Schema has no "online" field yet, so decide how (status, or a `last_seen` column).
-3. `CALIBRATION_MINUTES` is not read. It belongs in the device-claim endpoint (`calibration_ends_at = now() + CALIBRATION_MINUTES`).
+3. ~~`CALIBRATION_MINUTES`~~ Done: read in config and used by the claim endpoint.
 4. No bounds check / alerts yet (arch 8.3). Require **3 consecutive breaches** or a cooldown before inserting an alert (gotcha #7). Skip if no bound exists for that hour.
-5. No REST API yet (arch 5.5), no Supabase JWT check, no ownership check, no PIN rate-limit.
+5. REST API: `/health`, `/api/me`, groups and device claim exist (with JWT check, ownership check and PIN rate limit; see `api.md`). Still missing: telemetry/bounds reads, alerts, push subscribe.
 6. No Web Push yet (needs VAPID keys + `push_subscriptions` table, which exists).
 7. Config still needs `SUPABASE_JWT_SECRET`, `VAPID_*`, `CALIBRATION_MINUTES` (arch section 11).
 8. Schema defaults are DB-level (migration header says ids/timestamps/`updated_at` handled by DB triggers), so raw SQL inserts from Go are fine. Verify when adding the first alert insert.
